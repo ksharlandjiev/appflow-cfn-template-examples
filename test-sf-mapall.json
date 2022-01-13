@@ -1,0 +1,85 @@
+{
+    "Resources": {
+        "AFF3ADQB": {
+            "Type": "AWS::AppFlow::Flow",
+            "Properties": 
+            {
+    "FlowName": "testsf-all",
+    "Description": "",
+    "TriggerConfig": {
+        "TriggerType": "OnDemand"
+    },
+    "SourceFlowConfig": {
+        "ConnectorType": "Salesforce",
+        "ConnectorProfileName": "tst-sumitag",
+        "SourceConnectorProperties": {
+            "Salesforce": {
+                "Object": "Account"
+            }
+        }
+    },
+    "DestinationFlowConfigList": [{
+        "ConnectorType": "S3",
+        "DestinationConnectorProperties": {
+            "S3": {
+                "BucketName": "samagrs-test-us-west-1",
+                "BucketPrefix": "",
+                "S3OutputFormatConfig": {
+                    "FileType": "CSV",
+                    "PrefixConfig": {},
+                    "AggregationConfig": {
+                        "AggregationType": "SingleFile"
+                    }
+                }
+            }
+        }
+    }],
+    "Tasks": [
+    {
+        "TaskType": "Filter",
+        "SourceFields": ["Id"],
+        "ConnectorOperator": {
+            "Salesforce": "PROJECTION"
+        }
+    }, 
+    {
+        "TaskType": "Map",
+        "SourceFields": ["Id"],
+        "TaskProperties": [
+        {
+            "Key": "SOURCE_DATA_TYPE",
+            "Value": "integer"
+          },
+          {
+            "Key": "DESTINATION_DATA_TYPE",
+            "Value": "integer"
+          }
+      ],
+        "DestinationField": "UniqueId",
+        "ConnectorOperator": {
+            "Salesforce": "NO_OP"
+        }
+    },
+
+    {
+        "TaskType": "Map_all",
+        "SourceFields": [],
+        "TaskProperties": [{
+            "Key":"EXCLUDE_SOURCE_FIELDS_LIST",
+            "Value":"[\"Name\",\"Type\"]"
+        }],
+        "ConnectorOperator": {
+            "Salesforce": "NO_OP"
+        }
+    }
+    ],
+    "Tags": [
+      {
+        "Key": "testKey",
+        "Value": "testValue"
+      }
+  ]
+}
+}
+}
+}

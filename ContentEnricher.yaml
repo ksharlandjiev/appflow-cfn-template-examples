@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'VeevaPoC Sample SAM Template for VeevaPoC
+
+  '
+Globals:
+  Function:
+    Timeout: 300
+    Environment:
+      Variables:
+        GlueCatalogTable: salesforce_patient_s3
+        GlueCatalogDatabase: appflow-datalake-demo
+        GlueTableKey: patientid__c
+Parameters:
+  CloudWatchLogLevel:
+    Type: String
+    Default: ERROR
+    AllowedValues:
+    - ALL
+    - ERROR
+    - FATAL
+    - false
+  StepFunctionName:
+    Description: The state function name.
+    Type: String
+    Default: VeevaPoC2
+  VeevaDestinationS3Bucket:
+    Description: The S3 bucket used by AppFlow to save data from Veeva
+    Type: String
+    Default: veeva-poc-bucket2
+  VeevaAppFlowName:
+    Description: The name of the AppFlow Flow to ingest data from veeva
+    Type: String
+    Default: VeevaPoC2
+  AppFlowVeevaConnectorName:
+    Description: The name of the veeva connector
+    Type: String
+    Default: veeva
+Resources:
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: LambdaFunction
+      Handler: app.lambdaHandler
+      Runtime: nodejs12.x
+      Tracing: Active
+      MemorySize: 2048
+      VpcConfig:
+        SecurityGroupIds:
+        - sg-0d2246440c74ae48a
+        SubnetIds:
+        - subnet-0f831041e1454e013
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      - SecretsManagerReadWrite
+      - AmazonS3FullAccess
+      - AmazonSQSFullAccess
+      - AmazonAthenaFullAccess
+      Timeout: 240
+  StateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn: ProcessingStateMachineLogGroup
+    Properties:
+      Name:
+        Fn::Sub: ${StepFunctionName}
+      DefinitionUri: ../../statemachine/VeevaPoC.asl.json
+      DefinitionSubstitutions:
+        LambdaFunctionArn:
+          Fn::GetAtt:
+          - LambdaFunction
+          - Arn
+      Type: STANDARD
+      Logging:
+        Destinations:
+        - CloudWatchLogsLogGroup:
+            LogGroupArn:
+              Fn::GetAtt:
+              - ProcessingStateMachineLogGroup
+              - Arn
+        IncludeExecutionData: false
+        Level:
+          Ref: CloudWatchLogLevel
+      Role:
+        Fn::GetAtt:
+        - StatesExecutionRole
+        - Arn
+  StatesExecutionRole:
+    DependsOn: ProcessingStateMachineLogGroup
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - Fn::Sub: states.${AWS::Region}.amazonaws.com
+            - Fn::Sub: states.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: StatesLoggingPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogDelivery
+            - logs:GetLogDelivery
+            - logs:UpdateLogDelivery
+            - logs:DeleteLogDelivery
+            - logs:ListLogDeliveries
+            - logs:PutResourcePolicy
+            - logs:DescribeResourcePolicies
+            - logs:DescribeLogGroups
+            Resource: '*'
+      - PolicyName: StatesExecutionPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+              Fn::Join:
+              - :*
+              - - Fn::GetAtt:
+                  - LambdaFunction
+                  - Arn
+                - ''
+  ProcessingStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: stepfunctions/${StepFunctionName}
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+  LoggingBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: LoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: s3:GetBucketAcl
+          Resource:
+            Fn::Sub: arn:aws:s3:::${LoggingBucket}
+        - Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${LoggingBucket}/AWSLogs/${AWS::AccountId}/*
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: bucket-owner-full-control
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Ref: VeevaDestinationS3Bucket
+  SourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: SourceBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${VeevaDestinationS3Bucket}
+          - Fn::Sub: arn:aws:s3:::${VeevaDestinationS3Bucket}/*
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+    - LoggingBucketPolicy
+    Properties:
+      IsLogging: true
+      S3BucketName:
+        Ref: LoggingBucket
+      EventSelectors:
+      - DataResources:
+        - Type: AWS::S3::Object
+          Values:
+          - 'arn:aws:s3:::'
+          - Fn::Sub: ${SourceBucket.Arn}/${VeevaAppFlowName}
+        IncludeManagementEvents: true
+        ReadWriteType: WriteOnly
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: EventRule
+      State: ENABLED
+      EventPattern:
+        source:
+        - aws.s3
+        detail:
+          eventName:
+          - PutObject
+          requestParameters:
+            bucketName:
+            - Ref: SourceBucket
+      Targets:
+      - Id:
+          Ref: StepFunctionName
+        Arn:
+          Fn::GetAtt:
+          - StateMachine
+          - Arn
+        RoleArn:
+          Fn::GetAtt:
+          - EventsExecutionRole
+          - Arn
+  EventsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - events.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: Amazon_EventBridge_Invoke_Step_Functions
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - states:StartExecution
+            Resource:
+              Fn::GetAtt:
+              - StateMachine
+              - Arn
+  KSMKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key to be used by AppFlow.
+      EnableKeyRotation: true
+      PendingWindowInDays: 20
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id:
+          Fn::Sub: ${VeevaAppFlowName}-KMS
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Sub: arn:aws:iam::${AWS::AccountId}:root
+          Action: kms:*
+          Resource: '*'
+        - Sid: Allow access through Amazon AppFlow for all principals in the account
+            that are authorized to use Amazon AppFlow
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:ReEncrypt*
+          - kms:GenerateDataKey*
+          - kms:CreateGrant
+          - kms:DescribeKey
+          Resource: '*'
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Fn::Sub: ${AWS::AccountId}
+              kms:ViaService:
+                Fn::Sub: appflow.${AWS::Region}.amazonaws.com
+        - Sid: Allow access through S3 for all principals in the account that are
+            authorized to use S3
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action: kms:Decrypt
+          Resource: '*'
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Fn::Sub: ${AWS::AccountId}
+              kms:ViaService:
+                Fn::Sub: s3.${AWS::Region}.amazonaws.com
+        - Sid: Allow access through SecretManager for all principals in the account
+            that are authorized to use SecretManager
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:ReEncrypt*
+          - kms:GenerateDataKey*
+          - kms:CreateGrant
+          - kms:DescribeKey
+          Resource: '*'
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Fn::Sub: ${AWS::AccountId}
+              kms:ViaService:
+                Fn::Sub: secretsmanager.${AWS::Region}.amazonaws.com
+  AppFlowVeeva:
+    DependsOn: SourceBucket
+    Type: AWS::AppFlow::Flow
+    Properties:
+      Description: String
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName:
+              Ref: VeevaDestinationS3Bucket
+            S3OutputFormatConfig:
+              FileType: JSON
+      FlowName:
+        Ref: VeevaAppFlowName
+      KMSArn:
+        Fn::GetAtt:
+        - KSMKey
+        - Arn
+      SourceFlowConfig:
+        ConnectorProfileName:
+          Ref: AppFlowVeevaConnectorName
+        ConnectorType: Veeva
+        SourceConnectorProperties:
+          Veeva:
+            DocumentType: Reference
+            Object: documents/types/reference__c
+      Tasks:
+      - ConnectorOperator:
+          Veeva: PROJECTION
+        SourceFields:
+        - id
+        - reference_source__c
+        TaskType: Filter
+      - ConnectorOperator:
+          Veeva: NO_OP
+        DestinationField: id
+        SourceFields:
+        - id
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: id
+        - Key: SOURCE_DATA_TYPE
+          Value: id
+        TaskType: Map
+      - ConnectorOperator:
+          Veeva: NO_OP
+        DestinationField: reference_source__c
+        SourceFields:
+        - reference_source__c
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: String
+        - Key: SOURCE_DATA_TYPE
+          Value: String
+        TaskType: Map
+      TriggerConfig:
+        TriggerType: OnDemand

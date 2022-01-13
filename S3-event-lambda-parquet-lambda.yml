@@ -1,0 +1,499 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: "Basic Resources required for Appflow <-> Google Analytics workshop"
+Resources:
+
+  rGoogleAnalyticsTransformedBucket:
+    DependsOn:
+      - rGoogleAnalyticsTXLambda
+      - rGoogleAnalyticsTXLambdaInvokePermission
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['.',[ "google-analytics-transformed", !Ref 'AWS::Region', !Ref 'AWS::AccountId']]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  rGoogleAnalyticsIngestBucket:
+    DependsOn:
+      - rGoogleAnalyticsTXLambda
+      - rGoogleAnalyticsTXLambdaInvokePermission
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['.',[ "google-analytics-ingest", !Ref 'AWS::Region', !Ref 'AWS::AccountId']]
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - 
+            Function: !GetAtt rGoogleAnalyticsTXLambda.Arn
+            Event: "s3:ObjectCreated:*"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+
+  rGoogleAnalyticsIngestBucketPolicy:
+    DependsOn:
+      - rGoogleAnalyticsIngestBucket
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref rGoogleAnalyticsIngestBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Forcing encryption in transit
+          - Sid: SSLAccessOnly
+            Action: s3:*
+            Effect: Deny
+            Resource:
+              - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsIngestBucket, /*]]
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+            Principal: "*"
+          - Sid: AllowAppflowService  
+            Effect: Allow
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:ListMultipartUploadParts
+              - s3:ListBucketMultipartUploads
+              - s3:GetBucketAcl
+              - s3:Put*
+            Principal: 
+              Service: appflow.amazonaws.com
+            Resource: 
+              - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsIngestBucket, /*]]
+              - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsIngestBucket]]
+              #TODO revisit scope
+ 
+  rGoogleAnalyticsTransformedBucketPolicy:
+    DependsOn:
+      - rGoogleAnalyticsTransformedBucket
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref rGoogleAnalyticsTransformedBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Forcing encryption in transit
+          - Sid: SSLAccessOnly
+            Action: s3:*
+            Effect: Deny
+            Resource:
+              - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsTransformedBucket, /*]]
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+            Principal: "*"
+
+  rGoogleAnalyticsTXLambda:
+    Type: AWS::Lambda::Function    
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib.parse
+          from datetime import datetime as dt
+
+          def lambda_handler(event, context):
+            glue_client = boto3.client('glue')
+
+            bucket_name = urllib.parse.unquote(event['Records'][0]['s3']['bucket']['name'])
+            object_key = urllib.parse.unquote(event['Records'][0]['s3']['object']['key'])
+
+            response = glue_client.start_job_run(
+              JobName = 'GoogleAnalyticsJSONtoParquetJob',
+              Arguments = {
+                '--bucket_name': bucket_name,
+                '--object_key': object_key
+              }
+            )
+            return {
+              'statusCode': 200,
+              'body': json.dumps('Glue Job Initiaited')
+            }
+
+
+      FunctionName: GoogleAnalyticsJSONtoParquet
+      Description: "Lambda function for converting JSON payloads to Parquet"
+      MemorySize: 128
+      Handler:  index.lambda_handler
+      Runtime: python3.8
+      Timeout: 300
+      TracingConfig: 
+        Mode: Active
+      Role: !GetAtt rGoogleAnalyticsLambdaExecutionRole.Arn
+
+
+  rGoogleAnalyticsTXLambdaInvokePermission:
+    DependsOn:
+      - rGoogleAnalyticsTXLambda 
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt rGoogleAnalyticsTXLambda.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId            
+      SourceArn: !Join ['', ['arn:aws:s3:::', !Join ['.',[google-analytics-ingest, !Ref 'AWS::Region', !Ref 'AWS::AccountId']]]]        
+
+  rGoogleAnalyticsLambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      RoleName: "GoogleAnalyticsLambdaExecutionRole"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - lambda.amazonaws.com 
+            Action: 
+              - sts:AssumeRole      
+      Policies:
+        - PolicyName: Xray
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:Put*
+                Resource: "*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+
+  rGoogleAnalyticsCrawlerRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      RoleName: GoogleAnalyticsCrawlerRole
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com" 
+            Action: 
+              - "sts:AssumeRole"
+          
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"
+
+      Policies:
+        - PolicyName: LakeFormationServicePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Lakeformation
+                Effect: Allow
+                Action:
+                  - lakeformation:GetDataAccess
+                  - lakeformation:GrantPermissions
+                Resource: "*"
+        - PolicyName: LakeFormationPassRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: PassRolePermissions
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/GoogleAnalyticsCrawlerRole'
+        - PolicyName: DMSGlueJobPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: arn:aws:logs:*:*:*
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter*
+                Resource: "*"
+              - Effect: Allow
+                Action:                  
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsTransformedBucket,'/*']]
+  rGoogleAnalyticsCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role: !GetAtt rGoogleAnalyticsCrawlerRole.Arn
+      DatabaseName: !Ref rGoogleAnalyticsGlueDatabase      
+      Name: !Sub google-analytics-crawler
+      Configuration: '{"Version":1.0, "CrawlerOutput":{"Partitions":{"AddOrUpdateBehavior":"InheritFromTable"},"Tables":{"AddOrUpdateBehavior":"MergeNewColumns"}}}'
+      TablePrefix: google_analytics_
+      Targets:
+        S3Targets:
+        - Path: 
+            !Sub             
+            - s3://${sfbucket}/parquet/
+            - {sfbucket: !Ref rGoogleAnalyticsTransformedBucket}
+
+  rGoogleAnalyticsGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Description: !Sub "Database to hold Google Analytics data"
+        Name: "workshop_googleanalytics_db"        
+
+  rGoogleAnalyticsGlueScriptsPythonBucket:    
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join ['.',[ "glue-custom-scripts-py", !Ref 'AWS::Region', !Ref 'AWS::AccountId']]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  rGlueJobTempBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:  !Join ['.',[ "glue-custom-scripts-py-temp", !Ref 'AWS::Region', !Ref 'AWS::AccountId']]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+
+  rGoogleAnalyticsJSONtoParquetJobScript:
+    DependsOn:
+      - rGooleAnalyticsCustomResourcetoCreatJSONtoParquetScript
+      - rGoogleAnalyticsGlueScriptsPythonBucket
+    Type: Custom::CreateTransformationScript
+    Properties:
+      ServiceToken: !GetAtt rGooleAnalyticsCustomResourcetoCreatJSONtoParquetScript.Arn
+      the_bucket: !Ref rGoogleAnalyticsGlueScriptsPythonBucket
+      object_to_create: "custom/google-analytics-json-to-parquet.py"
+      file_body: !Sub |
+        import pandas as pd
+        import boto3              
+        import sys
+        import json
+        import urllib.parse        
+        from datetime import datetime as dt
+        from awsglue.utils import getResolvedOptions
+
+        def json_to_parquet():            
+          args = getResolvedOptions(sys.argv, ['JOB_NAME','bucket_name','object_key'])
+    
+          bucket_name = args['bucket_name']
+          object_key = args['object_key']
+
+          s3_client = boto3.client('s3')
+
+          raw_object = s3_client.get_object(Bucket=bucket_name, Key=object_key)
+          raw_data = json.loads(raw_object['Body'].read().decode('utf-8'))
+
+          if 'rows' not in raw_data['reports'][0]['data']:
+            raise ValueError("No data (metrics/dimensions) was acquired, nothing to transform.")
+
+          dimension_names = raw_data['reports'][0]['columnHeader']['dimensions']
+          metric_names = [r['name'] for r in raw_data['reports'][0]['columnHeader']['metricHeader']['metricHeaderEntries']]
+          metric_names_types = [r['type'] for r in raw_data['reports'][0]['columnHeader']['metricHeader']['metricHeaderEntries']]
+
+          df = pd.DataFrame()
+          dimensions_size = len(dimension_names)
+    
+          ### adding dimensions ###
+          if 'dimensions' in raw_data['reports'][0]['data']['rows'][0]:
+            for d in range(len(dimension_names)):
+              df.insert(d,dimension_names[d],[r['dimensions'][d] for r in raw_data['reports'][0]['data']['rows']])  
+          else:
+            dimensions_size = 0
+
+          ### adding metrics ###
+          if 'metrics' in raw_data['reports'][0]['data']['rows'][0]:
+            for m in range(len(metric_names)):
+              df.insert(dimensions_size + m, metric_names[m], [r['metrics'][0]['values'][m] for r in raw_data['reports'][0]['data']['rows']])   
+
+          output_file = dt.now().strftime('%Y%m%d%H%M%S%f')
+          output_path = '/tmp/{}.parquet'.format(output_file)
+    
+          df.to_parquet(output_path)
+
+          s3_client.upload_file(output_path, bucket_name.replace('ingest','transformed'), 'parquet/' + object_key + '.parquet')
+
+        json_to_parquet()
+
+  rGooleAnalyticsCustomResourcetoCreatJSONtoParquetScript:
+     Type: "AWS::Lambda::Function"
+     Properties:
+       Description: "Creating s3 objects from CFT"
+       FunctionName: CreateGlueCustomScript
+       Handler: index.handler
+       Role: !GetAtt AWSLambdaExecutionRole.Arn
+       Timeout: 60
+       Runtime: python3.7
+       Code:
+         ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+            response_data = {}
+            try:
+              s3bucket = event['ResourceProperties']['the_bucket']
+              s3key = event['ResourceProperties']['object_to_create']
+              body = event['ResourceProperties']['file_body']
+
+              request = event['RequestType']
+              client = boto3.client('s3')
+
+              if request in ['Create','Update']:
+                client.put_object(Body=body, Bucket=s3bucket, Key=s3key)
+              
+              if request in ['Delete']:
+                client.delete_object(Bucket=s3bucket, Key=s3key)
+                
+              cfnresponse.send(event,
+                                   context,
+                                   cfnresponse.SUCCESS,
+                                   response_data)
+            except Exception as e:
+              print("Execution failed...")
+              print(str(e))
+              response_data['Data'] = str(e)
+              cfnresponse.send(event,
+                                   context,
+                                   cfnresponse.FAILED,
+                                   response_data)
+
+
+  AWSLambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties: 
+      RoleName: "CreateGlueCustomScriptRole"
+      Path: "/service-role/"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - lambda.amazonaws.com 
+            Action: 
+              - sts:AssumeRole      
+      Policies:
+        - PolicyName: s3objects
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:Put*
+                  - s3:Get*
+                  - s3:Delete*                
+                Resource: 
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsGlueScriptsPythonBucket,'/*']]
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+
+  gGooleAnalyticsJSONtoParquetJob:
+    DependsOn:
+      - rGoogleAnalyticsJSONtoParquetJobScript
+    Type: "AWS::Glue::Job"
+    Properties:
+      Name: "GoogleAnalyticsJSONtoParquetJob"
+      Role: !Ref gGooleAnalyticsJSONtoParquetRole
+      ExecutionProperty: 
+        MaxConcurrentRuns: 100
+      Command: 
+        Name: "glueetl"
+        ScriptLocation: !Join ['',[ 's3://',!Ref rGoogleAnalyticsGlueScriptsPythonBucket,'/custom/google-analytics-json-to-parquet.py']]
+        PythonVersion: "3"
+      DefaultArguments: 
+        --TempDir:  !Join ['',[ 's3://',!Ref rGlueJobTempBucket, '/custom']]
+        --job-bookmark-option: "job-bookmark-disable"
+        --job-language: "python"
+      MaxRetries: 0      
+      Timeout: 5
+      GlueVersion: "2.0"      
+      NumberOfWorkers: 2
+      WorkerType: "G.1X"
+
+  gGooleAnalyticsJSONtoParquetRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/service-role/"
+      RoleName: "GoogleAnalyticsJSONtoParquetTransformationRole"
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - glue.amazonaws.com 
+            Action: 
+              - sts:AssumeRole            
+      ManagedPolicyArns:       
+        - "arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole"   
+      Policies:
+        - PolicyName: s3objects
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - s3:Abort*
+                  - s3:List*
+                  - s3:Get*
+                  - s3:Put*                
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsGlueScriptsPythonBucket]]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsGlueScriptsPythonBucket,'/*']]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGlueJobTempBucket]]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGlueJobTempBucket,'/*']]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsIngestBucket]]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsIngestBucket,'/*']]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsTransformedBucket]]
+                  - !Join ['', ['arn:aws:s3:::', !Ref rGoogleAnalyticsTransformedBucket,'/*']]
+                  
+
+Outputs:
+  oGoogleAnalyticsIngestBucket:
+    Value: !Ref rGoogleAnalyticsIngestBucket
+    Description: "Data Lake Ingestion Bucket"
+  oGoogleAnalyticsTransformedBucket:
+    Value: !Ref rGoogleAnalyticsTransformedBucket
+    Description: "Data Lake Transformed Bucket"
+  
+  oGoogleAnalyticsCrawlerRole:
+    Value: !Ref rGoogleAnalyticsCrawlerRole
+    Description: "Data Lake Crawler role"
+  oGoogleAnalyticsTXLambda:
+    Value: !Ref rGoogleAnalyticsTXLambda
+    Description: "Google JSON to Parquet Transofmration Lambda Function"
+

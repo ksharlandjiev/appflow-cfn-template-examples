@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Helping customers break down data silos with AWS Integration services
+  
+Resources:        
+# Create Amazon AppFlow to pull data from Salesforce and store into S3
+  AppFlowSFDCtoS3:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Ref AWS::StackName
+      TriggerConfig:
+        TriggerType: OnDemand
+      SourceFlowConfig:
+        ConnectorType: Servicenow
+        ConnectorProfileName: dev51323
+        SourceConnectorProperties:
+          ServiceNow:
+            Object: cmdb_rel_ci
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: appflow-demo-datalake
+            BucketPrefix: ''
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                AggregationType: None
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - typeñ
+        TaskProperties:
+        - Key: DATA_TYPE
+          Value: string
+        - Key: VALUES
+          Value: Applicative Flow To::Applicative Flow From
+        ConnectorOperator:
+          ServiceNow: CONTAINS
+      - TaskType: Filter
+        SourceFields:
+        - sys_id
+        - parent
+        - connection_strength
+        - sys_updated_by
+        - port
+        - sys_created_on
+        - sys_mod_count
+        - percent_outage
+        - sys_updated_on
+        - type
+        - sys_created_by
+        - child
+        ConnectorOperator:
+          ServiceNow: PROJECTION
+      - TaskType: Map
+        SourceFields:
+        - sys_id
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  GUID
+        - Key: DESTINATION_DATA_TYPE
+          Value:  GUID
+        DestinationField: sys_id
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - parent
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  reference
+        - Key: DESTINATION_DATA_TYPE
+          Value:  reference
+        DestinationField: parent
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - connection_strength
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  string
+        - Key: DESTINATION_DATA_TYPE
+          Value:  string
+        DestinationField: connection_strength
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - sys_updated_by
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  string
+        - Key: DESTINATION_DATA_TYPE
+          Value:  string
+        DestinationField: sys_updated_by
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - port
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  integer
+        - Key: DESTINATION_DATA_TYPE
+          Value:  integer
+        DestinationField: port
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - sys_created_on
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  datetime
+        - Key: DESTINATION_DATA_TYPE
+          Value:  datetime
+        DestinationField: sys_created_on
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - sys_mod_count
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  integer
+        - Key: DESTINATION_DATA_TYPE
+          Value:  integer
+        DestinationField: sys_mod_count
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - percent_outage
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  integer
+        - Key: DESTINATION_DATA_TYPE
+          Value:  integer
+        DestinationField: percent_outage
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - sys_updated_on
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  datetime
+        - Key: DESTINATION_DATA_TYPE
+          Value:  datetime
+        DestinationField: sys_updated_on
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - type
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  reference
+        - Key: DESTINATION_DATA_TYPE
+          Value:  reference
+        DestinationField: type
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - sys_created_by
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  string
+        - Key: DESTINATION_DATA_TYPE
+          Value:  string
+        DestinationField: sys_created_by
+        ConnectorOperator:
+          ServiceNow: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - child
+        TaskProperties:
+        - Key: SOURCE_DATA_TYPE
+          Value:  reference
+        - Key: DESTINATION_DATA_TYPE
+          Value:  reference
+        DestinationField: child
+        ConnectorOperator:
+          ServiceNow: NO_OP

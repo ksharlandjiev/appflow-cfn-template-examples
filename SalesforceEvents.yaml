@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Configure Amazon AppFlow to listen on Salesforce Events
+Parameters:
+  AppFlowSalesforceConnectorName:
+    Description: The name of the salesforce connector
+    Type: String
+
+  AppFlowSalesforceObject:
+    Description: The name of the salesforce object we will ingest with AppFlow
+    Type: String
+    Default: "AccountChangeEvent"     
+
+  EventBridgePartnerBus: 
+    Description: Name of the EventBridge Partner Bus
+    Type: String
+
+  AppFlowSalesForceFlowName: 
+    Description: Name of the flow to be used to pull data from Salesforce
+    Type: String
+    Default: "sfdc-events-to-event-bridge"
+
+  EnableDynamicFieldUpdate:
+    Description: Enable AppFlow to update schema with new fields 
+    Type: String  
+    Default: "false"
+
+  IncludeDeletedRecords:
+    Description: The name of the salesforce connector
+    Type: String  
+    Default: "false"
+
+
+Resources:        
+
+# Create S3 Bucket for Error logging
+  S3Bucket:
+    Type: "AWS::S3::Bucket"
+
+# Create bucket policy to allow AppFlow to use the S3 Bucket
+  S3BucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties: 
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          Resource:
+          - !GetAtt S3Bucket.Arn
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref S3Bucket
+              - /*    
+
+# Create Amazon AppFlow to listen to CDC events from Salesforce and push these in Amazon EventBridge
+  AppFlowSalesforceEvents:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Ref AppFlowSalesForceFlowName
+      TriggerConfig:
+        TriggerType: Event
+      SourceFlowConfig:
+        ConnectorType: Salesforce
+        ConnectorProfileName: !Ref AppFlowSalesforceConnectorName
+        SourceConnectorProperties:
+          Salesforce:
+            Object: !Ref AppFlowSalesforceObject
+            EnableDynamicFieldUpdate: !Ref EnableDynamicFieldUpdate
+            IncludeDeletedRecords: !Ref IncludeDeletedRecords
+      DestinationFlowConfigList:
+      - ConnectorType: EventBridge
+        DestinationConnectorProperties:
+          EventBridge:
+            Object: !Ref EventBridgePartnerBus
+            ErrorHandlingConfig:
+              BucketName: !Ref S3Bucket
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - OwnerId
+        - ChangeEventHeader
+        ConnectorOperator:
+          Salesforce: PROJECTION
+      - TaskType: Map
+        SourceFields:
+        - OwnerId
+        TaskProperties:
+          - Key: SOURCE_DATA_TYPE
+            Value: string
+          - Key: DESTINATION_DATA_TYPE
+            Value: string
+        DestinationField: OwnerId
+        ConnectorOperator:
+          Salesforce: NO_OP
+      - TaskType: Map
+        SourceFields:
+        - ChangeEventHeader
+        TaskProperties:
+          - Key: SOURCE_DATA_TYPE
+            Value: complexvalue
+          - Key: DESTINATION_DATA_TYPE
+            Value: complexvalue
+        DestinationField: ChangeEventHeader
+        ConnectorOperator:
+          Salesforce: NO_OP
+      
+      

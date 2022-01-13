@@ -1,0 +1,763 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'AppFlowTrigger
+
+  Sample SAM Template for AppFlowTrigger
+
+  '
+Globals:
+  Function:
+    Timeout: 3
+    Environment:
+      Variables:
+        flowName: s3-to-redshift
+Parameters:
+  CloudWatchLogLevel:
+    Type: String
+    Default: ERROR
+    AllowedValues:
+    - ALL
+    - ERROR
+    - FATAL
+    - false
+  S3BucketName:
+    Description: The S3 bucket used by AppFlow to save data from SAP
+    Type: String
+    Default: vsp-datalake01
+  PullFlowName:
+    Description: The name of the  Flow to ingest data from SAP
+    Type: String
+    Default: sap-to-s3
+  PushFlowName:
+    Description: The name of the  Flow to push data from Redshift
+    Type: String
+    Default: s3-to-redshift
+  PullFlowConnectorName:
+    Description: The name of the source connector
+    Type: String
+    Default: SAP
+  PushFlowConnectorName:
+    Description: The name of the desitnation connector
+    Type: String
+    Default: redshift
+Resources:
+  AppFlowLambdaTrigger:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: AppFlowLambdaTrigger
+      Handler: app.lambdaHandler
+      Runtime: nodejs12.x
+      Policies:
+      - AmazonAppFlowFullAccess
+  IntermediateBucket:
+    Type: AWS::S3::Bucket
+  IntermediateBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: IntermediateBucket
+      PolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${IntermediateBucket}
+          - Fn::Sub: arn:aws:s3:::${IntermediateBucket}/*
+  SourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Ref: S3BucketName
+  SourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: SourceBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          - s3:ListBucket
+          - s3:GetObject
+          Resource:
+          - Fn::Sub: arn:aws:s3:::${SourceBucket}
+          - Fn::Sub: arn:aws:s3:::${SourceBucket}/*
+  KSMKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key to be used by AppFlow.
+      EnableKeyRotation: true
+      PendingWindowInDays: 20
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: AppFlow-KMS
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Sub: arn:aws:iam::${AWS::AccountId}:root
+          Action: kms:*
+          Resource: '*'
+        - Sid: Allow access through Amazon AppFlow for all principals in the account
+            that are authorized to use Amazon AppFlow
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:ReEncrypt*
+          - kms:GenerateDataKey*
+          - kms:CreateGrant
+          - kms:DescribeKey
+          Resource: '*'
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Fn::Sub: ${AWS::AccountId}
+              kms:ViaService:
+                Fn::Sub: appflow.${AWS::Region}.amazonaws.com
+        - Sid: Allow access through S3 for all principals in the account that are
+            authorized to use S3
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action: kms:Decrypt
+          Resource: '*'
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Fn::Sub: ${AWS::AccountId}
+              kms:ViaService:
+                Fn::Sub: s3.${AWS::Region}.amazonaws.com
+        - Sid: Allow access through SecretManager for all principals in the account
+            that are authorized to use SecretManager
+          Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+          - kms:Encrypt
+          - kms:Decrypt
+          - kms:ReEncrypt*
+          - kms:GenerateDataKey*
+          - kms:CreateGrant
+          - kms:DescribeKey
+          Resource: '*'
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Fn::Sub: ${AWS::AccountId}
+              kms:ViaService:
+                Fn::Sub: secretsmanager.${AWS::Region}.amazonaws.com
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: rule to intercept events from the flow
+      EventPattern:
+        source:
+        - aws.appflow
+        detail-type:
+        - AppFlow End Flow Run Report
+        detail:
+          flow-name:
+          - Ref: PullFlowName
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - AppFlowLambdaTrigger
+          - Arn
+        Id: AppFlowLambdaTrigger
+  AppFlowPushDefinition:
+    DependsOn: SourceBucket
+    Type: AWS::AppFlow::Flow
+    Properties:
+      FlowName:
+        Ref: PushFlowName
+      KMSArn:
+        Fn::GetAtt:
+        - KSMKey
+        - Arn
+      TriggerConfig:
+        TriggerType: OnDemand
+      SourceFlowConfig:
+        ConnectorType: S3
+        SourceConnectorProperties:
+          S3:
+            BucketName:
+              Ref: S3BucketName
+            BucketPrefix:
+              Fn::Sub: ${PullFlowName}/
+      DestinationFlowConfigList:
+      - ConnectorProfileName:
+          Ref: PushFlowConnectorName
+        ConnectorType: Redshift
+        DestinationConnectorProperties:
+          Redshift:
+            IntermediateBucketName: redshift-appflow-bucket-437909331493-us-east-1
+            Object: public.orders
+      Tasks:
+      - ConnectorOperator:
+          S3: PROJECTION
+        SourceFields:
+        - SalesOrder
+        - SalesOrderType
+        - SalesOrganization
+        - DistributionChannel
+        - OrganizationDivision
+        - SalesGroup
+        - SalesOffice
+        - SalesDistrict
+        - SoldToParty
+        - CreationDate
+        - CreatedByUser
+        - LastChangeDate
+        - LastChangeDateTime
+        - PurchaseOrderByCustomer
+        - CustomerPurchaseOrderType
+        - CustomerPurchaseOrderDate
+        - SalesOrderDate
+        - TotalNetAmount
+        - TransactionCurrency
+        - SDDocumentReason
+        - PricingDate
+        - RequestedDeliveryDate
+        - ShippingCondition
+        - CompleteDeliveryIsDefined
+        - ShippingType
+        - HeaderBillingBlockReason
+        - DeliveryBlockReason
+        - IncotermsClassification
+        - IncotermsTransferLocation
+        - IncotermsLocation1
+        - IncotermsLocation2
+        - IncotermsVersion
+        - CustomerPaymentTerms
+        - PaymentMethod
+        - AssignmentReference
+        - ReferenceSDDocument
+        - ReferenceSDDocumentCategory
+        - CustomerTaxClassification1
+        - TaxDepartureCountry
+        - VATRegistrationCountry
+        - SalesOrderApprovalReason
+        - SalesDocApprovalStatus
+        - OverallSDProcessStatus
+        - TotalCreditCheckStatus
+        - OverallTotalDeliveryStatus
+        - OverallSDDocumentRejectionSts
+        TaskType: Filter
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesorder
+        SourceFields:
+        - SalesOrder
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesordertype
+        SourceFields:
+        - SalesOrderType
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesorganization
+        SourceFields:
+        - SalesOrganization
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: distributionchannel
+        SourceFields:
+        - DistributionChannel
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: organizationdivision
+        SourceFields:
+        - OrganizationDivision
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesgroup
+        SourceFields:
+        - SalesGroup
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesoffice
+        SourceFields:
+        - SalesOffice
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesdistrict
+        SourceFields:
+        - SalesDistrict
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: soldtoparty
+        SourceFields:
+        - SoldToParty
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: creationdate
+        SourceFields:
+        - CreationDate
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: createdbyuser
+        SourceFields:
+        - CreatedByUser
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: lastchangedate
+        SourceFields:
+        - LastChangeDate
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: lastchangedatetime
+        SourceFields:
+        - LastChangeDateTime
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: purchaseorderbycustomer
+        SourceFields:
+        - PurchaseOrderByCustomer
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: customerpurchaseordertype
+        SourceFields:
+        - CustomerPurchaseOrderType
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: customerpurchaseorderdate
+        SourceFields:
+        - CustomerPurchaseOrderDate
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesorderdate
+        SourceFields:
+        - SalesOrderDate
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: totalnetamount
+        SourceFields:
+        - TotalNetAmount
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: numeric
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: transactioncurrency
+        SourceFields:
+        - TransactionCurrency
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: sddocumentreason
+        SourceFields:
+        - SDDocumentReason
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: pricingdate
+        SourceFields:
+        - PricingDate
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: requesteddeliverydate
+        SourceFields:
+        - RequestedDeliveryDate
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: shippingcondition
+        SourceFields:
+        - ShippingCondition
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: completedeliveryisdefined
+        SourceFields:
+        - CompleteDeliveryIsDefined
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: shippingtype
+        SourceFields:
+        - ShippingType
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: headerbillingblockreason
+        SourceFields:
+        - HeaderBillingBlockReason
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: deliveryblockreason
+        SourceFields:
+        - DeliveryBlockReason
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: incotermsclassification
+        SourceFields:
+        - IncotermsClassification
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: incotermstransferlocation
+        SourceFields:
+        - IncotermsTransferLocation
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: incotermslocation1
+        SourceFields:
+        - IncotermsLocation1
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: incotermslocation2
+        SourceFields:
+        - IncotermsLocation2
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: incotermsversion
+        SourceFields:
+        - IncotermsVersion
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: customerpaymentterms
+        SourceFields:
+        - CustomerPaymentTerms
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: integer
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: paymentmethod
+        SourceFields:
+        - PaymentMethod
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: assignmentreference
+        SourceFields:
+        - AssignmentReference
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: referencesddocument
+        SourceFields:
+        - ReferenceSDDocument
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: referencesddocumentcategory
+        SourceFields:
+        - ReferenceSDDocumentCategory
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: customertaxclassification1
+        SourceFields:
+        - CustomerTaxClassification1
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: taxdeparturecountry
+        SourceFields:
+        - TaxDepartureCountry
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: vatregistrationcountry
+        SourceFields:
+        - VATRegistrationCountry
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesorderapprovalreason
+        SourceFields:
+        - SalesOrderApprovalReason
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: salesdocapprovalstatus
+        SourceFields:
+        - SalesDocApprovalStatus
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: overallsdprocessstatus
+        SourceFields:
+        - OverallSDProcessStatus
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: totalcreditcheckstatus
+        SourceFields:
+        - TotalCreditCheckStatus
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: overalltotaldeliverystatus
+        SourceFields:
+        - OverallTotalDeliveryStatus
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+      - ConnectorOperator:
+          S3: NO_OP
+        DestinationField: overallsddocumentrejectionsts
+        SourceFields:
+        - OverallSDDocumentRejectionSts
+        TaskProperties:
+        - Key: DESTINATION_DATA_TYPE
+          Value: character varying
+        TaskType: Map
+  AppFlowPullDefinition:
+    DependsOn: SourceBucket
+    Type: AWS::AppFlow::Flow
+    Properties:
+      FlowName:
+        Ref: PullFlowName
+      KMSArn:
+        Fn::GetAtt:
+        - KSMKey
+        - Arn
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName:
+              Ref: SourceBucket
+            S3OutputFormatConfig:
+              FileType: CSV
+      SourceFlowConfig:
+        ConnectorProfileName:
+          Ref: PullFlowConnectorName
+        ConnectorType: SAPOData
+        SourceConnectorProperties:
+          SAPOData:
+            objectPath: /sap/opu/odata/sap/API_SALES_ORDER_SRV/A_SalesOrder
+      Tasks:
+      - ConnectorOperator:
+          SAPOData: PROJECTION
+        SourceFields:
+        - SalesOrder
+        - SalesOrderType
+        - SalesOrganization
+        - DistributionChannel
+        - OrganizationDivision
+        - SalesGroup
+        - SalesOffice
+        - SalesDistrict
+        - SoldToParty
+        - CreationDate
+        - CreatedByUser
+        - LastChangeDate
+        - LastChangeDateTime
+        - PurchaseOrderByCustomer
+        - CustomerPurchaseOrderType
+        - CustomerPurchaseOrderDate
+        - SalesOrderDate
+        - TotalNetAmount
+        - TransactionCurrency
+        - SDDocumentReason
+        - PricingDate
+        - RequestedDeliveryDate
+        - ShippingCondition
+        - CompleteDeliveryIsDefined
+        - ShippingType
+        - HeaderBillingBlockReason
+        - DeliveryBlockReason
+        - IncotermsClassification
+        - IncotermsTransferLocation
+        - IncotermsLocation1
+        - IncotermsLocation2
+        - IncotermsVersion
+        - CustomerPaymentTerms
+        - PaymentMethod
+        - AssignmentReference
+        - ReferenceSDDocument
+        - ReferenceSDDocumentCategory
+        - CustomerTaxClassification1
+        - TaxDepartureCountry
+        - VATRegistrationCountry
+        - SalesOrderApprovalReason
+        - SalesDocApprovalStatus
+        - OverallSDProcessStatus
+        - TotalCreditCheckStatus
+        - OverallTotalDeliveryStatus
+        - OverallSDDocumentRejectionSts
+        TaskType: Filter
+      - TaskType: Map_all
+        SourceFields: []
+        ConnectorOperator:
+          SAPOData: NO_OP
+      TriggerConfig:
+        TriggerType: OnDemand

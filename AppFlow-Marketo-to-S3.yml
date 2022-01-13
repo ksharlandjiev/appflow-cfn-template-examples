@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Helping customers break down data silos with Amazon AppFlow
+  
+Parameters:
+  AppFlowMarketoConnectorName:
+    Description: The name of the Marketo connector
+    Type: String
+    Default: "marketo"    
+
+  AppFlowMarketoObject:
+    Description: The name of the Marketo object we will ingest with AppFlow
+    Type: String
+    Default: "leads"     
+
+  DestinationS3BucketName: 
+    Description: Name of the Destination S3 Bucket
+    Type: String
+
+Resources:        
+# Create Amazon AppFlow to pull data from Marketo and store into S3
+  AppFlowMarketotoS3:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Ref AWS::StackName
+      Description: 'Pull data from Marketo and saves into S3'
+      TriggerConfig:
+        TriggerType: OnDemand
+      SourceFlowConfig:
+        ConnectorType: Marketo
+        ConnectorProfileName: !Ref AppFlowMarketoConnectorName
+        SourceConnectorProperties:
+          Marketo:
+            Object: !Ref AppFlowMarketoObject
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: !Ref DestinationS3BucketName
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                aggregationType: None
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - createdAt
+        TaskProperties:
+        - Key: DATA_TYPE
+          Value: datetime
+        - Key: LOWER_BOUND
+          Value: '1641945600000'
+        - Key: UPPER_BOUND
+          Value: '1642032000000'
+        ConnectorOperator:
+          Marketo: BETWEEN
+
+      - TaskType: Filter      
+        SourceFields:
+        - company
+        ConnectorOperator:
+          Marketo: PROJECTION
+
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '[]'
+        ConnectorOperator:
+          Marketo: NO_OP

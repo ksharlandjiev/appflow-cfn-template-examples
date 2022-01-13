@@ -1,0 +1,93 @@
+{
+    "Resources": {
+        "AFF3ADQC": {
+            "Type": "AWS::AppFlow::Flow",
+            "Properties": {
+                "FlowName": "testeventcomplexvalue",
+                "Description": "",
+                "TriggerConfig": {
+                    "TriggerType": "Event"
+                },
+                "SourceFlowConfig": {
+                    "ConnectorType": "Salesforce",
+                    "ConnectorProfileName": "MyConnectedAppProfle1",
+                    "SourceConnectorProperties": {
+                        "Salesforce": {
+                            "Object": "LeadChangeEvent",
+                            "EnableDynamicFieldUpdate": false,
+                            "IncludeDeletedRecords": false
+                        }
+                    }
+                },
+                "DestinationFlowConfigList": [
+                    {
+                        "ConnectorType": "EventBridge",
+                        "DestinationConnectorProperties": {
+                            "EventBridge": {
+                                "Object": "aws.partner/appflow/salesforce.com/176341458743",
+                                "ErrorHandlingConfig": {
+                                    "BucketName": "appflow-demo-datalake"
+                                }
+                            }
+                        }
+                    }
+                ],
+                "Tasks": [
+                    {
+                        "TaskType": "Filter",
+                        "SourceFields": [
+                            "Id",
+                            "ReplayId",
+                            "ChangeEventHeader"
+                        ],
+                        "ConnectorOperator": {
+                            "Salesforce": "PROJECTION"
+                        }
+                    },
+                    {
+                        "TaskType": "Map",
+                        "SourceFields": [
+                            "Id"
+                        ],
+                        "TaskProperties": [
+                            { "Key": "SOURCE_DATA_TYPE", "Value": "id" },
+                            { "Key": "DESTINATION_DATA_TYPE", "Value": "id"}
+                        ],
+                        "DestinationField": "Id",
+                        "ConnectorOperator": {
+                            "Salesforce": "NO_OP"
+                        }
+                    },
+                    {
+                        "TaskType": "Map",
+                        "SourceFields": [
+                            "ReplayId"
+                        ],
+                        "TaskProperties": [
+                            { "Key": "SOURCE_DATA_TYPE", "Value": "string"},
+                            { "Key": "DESTINATION_DATA_TYPE", "Value": "string"}
+                        ],
+                        "DestinationField": "ReplayId",
+                        "ConnectorOperator": {
+                            "Salesforce": "NO_OP"
+                        }
+                    },
+                    {
+                        "TaskType": "Map",
+                        "SourceFields": [
+                            "ChangeEventHeader"
+                        ],
+                        "TaskProperties": [
+                            { "Key": "SOURCE_DATA_TYPE", "Value": "complexvalue" },
+                            { "Key": "DESTINATION_DATA_TYPE", "Value": "complexvalue"}
+                        ],
+                        "DestinationField": "ChangeEventHeader",
+                        "ConnectorOperator": {
+                            "Salesforce": "NO_OP"
+                        }
+                    }
+                ]
+            }
+        }
+    }
+}

@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Helping customers break down data silos with Amazon AppFlow
+  
+Parameters:
+  AppFlowVeevaConnectorName:
+    Description: The name of the Veeva connector
+    Type: String
+    Default: "veeva"    
+
+  AppFlowVeevaObject:
+    Description: The name of the Veeva object we will ingest with AppFlow
+    Type: String
+    Default: "activity__v"     
+
+  DestinationS3BucketName: 
+    Description: Name of the Destination S3 Bucket
+    Type: String
+    Default: "vsp-demo-datalake" 
+
+Resources:        
+# Create Amazon AppFlow to pull data from Veeva and store into S3
+  AppFlowVeevatoS3:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Ref AWS::StackName
+      Description: 'Pull data from Veeva and saves into S3'
+      TriggerConfig:
+        TriggerType: OnDemand
+      SourceFlowConfig:
+        ConnectorType: Veeva
+        ConnectorProfileName: !Ref AppFlowVeevaConnectorName
+        SourceConnectorProperties:
+          Veeva:
+            Object: !Ref AppFlowVeevaObject
+            IncludeSourceFiles: false
+            IncludeRenditions: false
+            IncludeAllVersions: false
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: !Ref DestinationS3BucketName
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                aggregationType: None
+      Tasks:
+      - TaskType: Filter      
+        SourceFields:
+        - id
+        ConnectorOperator:
+          Veeva: PROJECTION
+
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '[]'
+        ConnectorOperator:
+          Veeva: NO_OP

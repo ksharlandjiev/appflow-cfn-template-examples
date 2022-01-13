@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  This sample, non-production-ready template is part of a proof of concept and demonstrate how you can use AWS services to provide an application integration framework. ©2021 Amazon Web Services, Inc. or its affiliates. All Rights Reserved. This AWS Content is provided subject to the terms of the AWS Customer Agreement available at http://aws.amazon.com/agreement or other written agreement between Customer and either Amazon Web Services, Inc. or Amazon Web Services EMEA SARL or both.
+  
+Parameters:
+  AppFlowSalesforceConnectorName:
+    Description: The name of the salesforce connector
+    Type: String
+
+  AppFlowSalesForceFlowName: 
+    Description: Name of the flow to be used to pull data from Salesforce
+    Type: String
+
+  SourceS3BucketName: 
+    Description: Name of the Destination S3 Bucket
+    Type: String
+
+  SourceS3BucketNamePrefix: 
+    Description: S3 bucket prefix where data resides.
+    Type: String
+
+Resources:        
+  # Create Amazon AppFlow to push data from S3 to Salesforce
+  AppFlowSalesforcePush: 
+      Type: AWS::AppFlow::Flow
+      Properties: 
+        FlowName: !Ref AppFlowSalesForceFlowName
+        TriggerConfig:
+          TriggerType: OnDemand
+        SourceFlowConfig:
+          ConnectorType: S3
+          SourceConnectorProperties:
+            S3:
+              BucketName: !Ref SourceS3BucketName
+              BucketPrefix: !Ref SourceS3BucketNamePrefix
+              S3InputFormatConfig:
+                S3InputFileType: JSON
+        DestinationFlowConfigList:
+        - ConnectorType: Salesforce
+          ConnectorProfileName: !Ref AppFlowSalesforceConnectorName
+          DestinationConnectorProperties:
+            Salesforce:
+              Object: Account
+              WriteOperationType: INSERT
+        Tasks:
+        - TaskType: Filter
+          SourceFields:
+          - Name
+          - Type
+          - ShippingStreet
+          - Phone
+          - Fax
+          ConnectorOperator:
+            S3: PROJECTION
+        - TaskType: Map
+          SourceFields:
+          - Name
+          TaskProperties:
+            - Key: DESTINATION_DATA_TYPE
+              Value: boolean
+          DestinationField: Name
+          ConnectorOperator:
+            S3: NO_OP
+        - TaskType: Map
+          SourceFields:
+          - Type
+          TaskProperties:
+            - Key: DESTINATION_DATA_TYPE
+              Value: boolean
+          DestinationField: Type
+          ConnectorOperator:
+            S3: NO_OP
+        - TaskType: Map
+          SourceFields:
+          - ShippingStreet
+          TaskProperties:
+            - Key: DESTINATION_DATA_TYPE
+              Value: boolean
+          DestinationField: ShippingStreet
+          ConnectorOperator:
+            S3: NO_OP
+        - TaskType: Map
+          SourceFields:
+          - Phone
+          TaskProperties:
+            - Key: DESTINATION_DATA_TYPE
+              Value: string
+          DestinationField: Phone
+          ConnectorOperator:
+            S3: NO_OP
+        - TaskType: Map
+          SourceFields:
+          - Fax
+          TaskProperties:
+            - Key: DESTINATION_DATA_TYPE
+              Value: string
+          DestinationField: Fax
+          ConnectorOperator:
+            S3: NO_OP

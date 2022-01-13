@@ -1,0 +1,553 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  This template will create a set of resources:
+    * Amazon AppFlow batch flow to fetch data from Salesfroce to S3. 
+    * Amazon AppFlow event flow to listen for CDC changes and propagate this to EventBridge. 
+  IMPORTANT!!!
+    - Search for "Athena StartQueryExecution" and modify the query once you know the database and table name. 
+      Feel free to modify the entire query if you like!
+
+  Installation Guide: 
+  1. Create Salesforce connector profile in Amazon AppFlow
+  2. Launch this template and wait until finish. 
+  3. Go to Amazon Athena and setup Athena S3 bucket.
+  4. Launch Amazon AppFlow batch flow - this will populate your datalake and trigger Glue Crawler to craw the data. 
+  5. Go to EventBridge and associate the partner event bus 
+  6. Go to Amazon AppFlow and activate the event driven flow. 
+  
+  
+Parameters:
+  AppFlowSalesforceConnectorName:
+    Description: The name of the salesforce connector. Must be manualy created before the execution of this template. 
+    Type: String
+    Default: "sfdc"
+
+  AppFlowSalesforceObject:
+    Description: The name of the salesforce object we will ingest with AppFlow to our S3 Datalake.
+    Type: String
+    Default: "Lead"     
+
+  AppFlowSalesForceFlowName: 
+    Description: Name of the flow to be used to pull data from Salesforce
+    Type: String
+    Default: "SFDC-DataLake-Hydration"  
+
+  ScheduleStartTime: 
+    Description: Scheduled flow needs start data (timestamp) and timezone.
+    Type: Number  
+    Default: 1639180740
+
+  ScheduleOffset:
+    Description: Scheduled flow needs start data (timestamp) and timezone.
+    Type: Number
+    Default: 0
+
+  ScheduleExpression: 
+    Description: Scheduled flow needs start data (timestamp) and timezone.
+    Type: String  
+    Default: "1days"
+
+  EnableDynamicFieldUpdate:
+    Description: Enable AppFlow to update schema with new fields 
+    Type: String  
+    Default: "false"
+
+  IncludeDeletedRecords:
+    Description: Enable AppFlow to import deleted records.
+    Type: String  
+    Default: "false"
+
+  QueueUrl: 
+    Description: "The CDC function uses SQS to send the enriched message. Please specify the SQS URL here."
+    Type: String
+    Default: "https://sqs.us-east-1.amazonaws.com/294239653061/testq"      
+
+  CloudWatchLogLevel:
+    Description: "Log level for AWS StepFunctions"
+    Type: String
+    Default: ERROR
+    AllowedValues:
+      - ALL
+      - ERROR
+      - FATAL
+      - OFF
+
+Resources:
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# S3
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Create S3 Datalake
+  DatalakeBucket:
+    Type: "AWS::S3::Bucket"
+
+# Create S3 Datalake Bucket POlicy
+  DatalakeBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties: 
+      Bucket: !Ref DatalakeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          Resource:
+          - !GetAtt DatalakeBucket.Arn
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref DatalakeBucket
+              - /*
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# S3 Events and Errors Handling
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# S3 bucket to handle errors and large events
+  LoggingBucket:
+    Type: "AWS::S3::Bucket"
+
+# Logging bucket Policy
+  LoggingBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties: 
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          Resource:
+          - !GetAtt LoggingBucket.Arn
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref LoggingBucket
+              - /*
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# AppFlow Datalake
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Create Amazon AppFlow to pull data from Salesforce and store into S3
+  AppFlowSFDCtoS3:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Sub "${AppFlowSalesForceFlowName}-${AWS::StackName}-batch"
+      Description: "Pull data from Salesforce and saves into S3 datalake"
+      TriggerConfig:
+        TriggerType: OnDemand      
+      # TriggerConfig: 
+      #   TriggerType: Scheduled      
+      #   TriggerProperties:
+      #     ScheduleExpression: !Sub "rate(${ScheduleExpression})"
+      #     DataPullMode: Incremental
+      #     ScheduleStartTime: !Ref ScheduleStartTime
+      #     ScheduleOffset: !Ref ScheduleOffset
+      SourceFlowConfig:
+        ConnectorType: Salesforce
+        ConnectorProfileName: !Ref AppFlowSalesforceConnectorName
+        SourceConnectorProperties:
+          Salesforce:
+            Object: !Ref AppFlowSalesforceObject
+            EnableDynamicFieldUpdate: !Ref EnableDynamicFieldUpdate
+            IncludeDeletedRecords: !Ref IncludeDeletedRecords 
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: !Ref DatalakeBucket
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                aggregationType: None
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - Id
+        ConnectorOperator:
+          Salesforce: PROJECTION
+
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '[]'
+        ConnectorOperator:
+          Salesforce: NO_OP
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# AppFlow CDC
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Create Amazon AppFlow to listen to CDC events from Salesforce and push these in Amazon EventBridge
+  AppFlowSalesforceEvents:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Sub "${AppFlowSalesForceFlowName}-${AWS::StackName}-event"
+      TriggerConfig:
+        TriggerType: Event
+      SourceFlowConfig:
+        ConnectorType: Salesforce
+        ConnectorProfileName: !Ref AppFlowSalesforceConnectorName
+        SourceConnectorProperties:
+          Salesforce:
+            Object: !Sub "${AppFlowSalesforceObject}ChangeEvent"
+            EnableDynamicFieldUpdate: !Ref EnableDynamicFieldUpdate
+            IncludeDeletedRecords: !Ref IncludeDeletedRecords
+      DestinationFlowConfigList:
+      - ConnectorType: EventBridge
+        DestinationConnectorProperties:
+          EventBridge:
+            Object: !Sub "aws.partner/appflow/salesforce.com/${AWS::AccountId}"
+            ErrorHandlingConfig:
+              BucketName: !Ref LoggingBucket
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - Id
+        ConnectorOperator:
+          Salesforce: PROJECTION
+
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '[]'
+        ConnectorOperator:
+          Salesforce: NO_OP
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Glue
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Create an AWS Glue database
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Description: Database to hold tables for our Salesforce datalake. 
+
+#Create IAM Role assumed by the crawler. For demonstration, this role is given all permissions.
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole      
+      Policies:
+        - PolicyName: !Sub "AWSGlueServiceRole-${AWS::StackName}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Join [ "/*", [!GetAtt DatalakeBucket.Arn, ""]]
+
+# Create an AWS Glue crawler to get schema from Salesforce data
+  GlueCrawlerSalesforce:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Role: !GetAtt GlueRole.Arn
+      #Classifiers: none, use the default classifier
+      Description: AWS Glue crawler to crawl S3 datalake.
+      #Schedule: none, use default run-on-demand
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          #  S3 bucket with the flights data
+          - Path: !Sub "s3://${DatalakeBucket}/${AppFlowSFDCtoS3}/"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# StepFunction - startCrawler
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+ # Definition of our AWS Step Function. The actual ASL is extracted in statemachine/RealWorldExample.asl.json file.          
+  StateMachineStartCrawler:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: ProcessingStateMachineLogGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-ETL
+      Definition:
+        Comment: A description of my state machine
+        StartAt: StartCrawler
+        States:
+          StartCrawler:
+            Type: Task
+            End: true
+            Parameters:
+              Name: !Ref GlueCrawlerSalesforce
+            Resource: arn:aws:states:::aws-sdk:glue:startCrawler        
+
+      StateMachineType: "EXPRESS"  
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ProcessingStateMachineLogGroup.Arn
+              
+        IncludeExecutionData: false
+        Level: !Ref CloudWatchLogLevel 
+      RoleArn: !GetAtt StatesExecutionRole.Arn            
+      
+  # Execution Role to allow Step Function to InvokeLambda, Log data into CloudWatch, publish events in EvnetBridge          
+  StatesExecutionRole:
+    DependsOn: ProcessingStateMachineLogGroup
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+                - !Sub states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"   
+      Policies:
+        - PolicyName: StatesLoggingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+        - PolicyName: StartGlueCrawler
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartCrawler
+                Resource: 
+                - !Join
+                  - ''
+                  - - 'arn:aws:glue:'
+                    - !Sub "${AWS::Region}:"
+                    - !Sub "${AWS::AccountId}:"
+                    - "crawler/"
+                    - !Ref GlueCrawlerSalesforce
+                
+  # Define CloudWatch Log Group for State execution logs
+  ProcessingStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "stepfunctions/${AWS::StackName}-crawler-starter" 
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# EventBridge - run Step Function - run Crawler
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Event Rule to trigger Glue Crawler once data from salesforce come into our datalake.
+  EventRuleSalesForceDataLake: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "EventRule"
+      State: "ENABLED"
+      EventPattern: 
+        source:
+        - aws.appflow
+        detail:
+          flow-name:
+          - !Ref AppFlowSFDCtoS3
+          status:
+          - "Execution Successful"
+      Targets: 
+        - 
+          Id: !GetAtt StateMachineStartCrawler.Name
+          Arn: !Ref StateMachineStartCrawler
+          RoleArn: !GetAtt 
+            - EventBridgeIAMrole
+            - Arn
+# EventBridge IAM role to allow execution fo step functions.
+  EventBridgeIAMrole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: PutEventsDestinationBus
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                  - 'states:StartSyncExecution'
+                Resource: !Ref StateMachineStartCrawler
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# EventBridge - Salesforce CDC Rule
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Event Rule to trigger on CDC
+  CDCEventRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "EventRule to intercept Salesforce CDC events."
+      EventBusName: !Sub "aws.partner/appflow/salesforce.com/${AWS::AccountId}"
+      State: "ENABLED"
+      EventPattern: 
+        source:
+        - !Ref AWS::AccountId
+      Targets: 
+        - 
+          Id: !GetAtt StateMachineStartCrawler.Name
+          Arn: !Ref StateMachineStartCrawler
+          RoleArn: !GetAtt 
+            - EventBridgeIAMrole
+            - Arn
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# StepFunction - CDC
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+ # StepFunction to start on CDC event, fetch data from S3 datalake and publish to SQS.
+  CDCStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: CDCStateMachineLogGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-CDC
+      Definition:
+        Comment: Content Enricher & Message (SQS)
+        StartAt: Choice
+        States:
+          Choice:
+            Type: Choice
+            Choices:
+            - Variable: "$.detail.ChangeEventHeader.changedFields"
+              IsPresent: true
+              Next: Map
+            Default: Pass (1)
+          Pass (1):
+            Type: Pass
+            End: true
+          Map:
+            Type: Map
+            Iterator:
+              StartAt: Athena StartQueryExecution
+              States:
+                Athena StartQueryExecution:
+                  Type: Task
+                  Resource: arn:aws:states:::athena:startQueryExecution.sync
+                  Parameters:
+                    WorkGroup: primary
+                    QueryString.$: !Sub States.Format('SELECT * FROM "gluedatabase-cbmufwedpdp4"."sfdc_datalake_hydration_test3_batch"
+                      WHERE id=\'{}\'', $)
+                    ResultConfiguration:
+                      OutputLocation: s3://athenac6ggwss2b7ap/results
+                  Next: GetObject (1)
+                GetObject (1):
+                  Type: Task
+                  Parameters:
+                    Bucket: athenac6ggwss2b7ap
+                    Key.$: States.Format('results/{}.csv', $.QueryExecution.QueryExecutionId)
+                  Resource: arn:aws:states:::aws-sdk:s3:getObject
+                  Next: SQS SendMessage
+                  OutputPath: "$.Body"
+                SQS SendMessage:
+                  Type: Task
+                  Resource: arn:aws:states:::sqs:sendMessage
+                  Parameters:
+                    MessageBody.$: "$"
+                    QueueUrl: !Ref QueueUrl
+                  End: true
+            ItemsPath: "$.detail.ChangeEventHeader.recordIds"
+            End: true
+      StateMachineType: "STANDARD"  
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt CDCStateMachineLogGroup.Arn
+        IncludeExecutionData: false
+        Level: !Ref CloudWatchLogLevel 
+      RoleArn: !GetAtt CDCStatesExecutionRole.Arn            
+      
+  # Execution Role to allow Step Function to InvokeLambda, Log data into CloudWatch, publish events in EvnetBridge          
+  CDCStatesExecutionRole:
+    DependsOn: CDCStateMachineLogGroup
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+                - !Sub states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"   
+      Policies:
+        - PolicyName: StatesLoggingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+        - PolicyName: StartGlueCrawler
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - athena:*
+                Resource: "*"
+        - PolicyName: S3Get
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                Resource: !GetAtt DatalakeBucket.Arn               
+                
+  # Define CloudWatch Log Group for State execution logs
+  CDCStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "stepfunctions/${AWS::StackName}-cdc"             

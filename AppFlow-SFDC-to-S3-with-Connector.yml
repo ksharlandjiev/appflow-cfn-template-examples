@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Helping customers break down data silos with AWS Integration services.
+  IMPORTANT: You need to create a new secret in SecretsManager with the following Key Values: 
+    AccessToken and RefreshToken
+
+Parameters:
+  AppFlowSalesforceObject:
+    Description: The name of the salesforce object we will ingest with AppFlow
+    Type: String
+    Default: "Lead"
+
+  SalesForceInstanceUrl: 
+    Description: Salesforce instance URL
+    Type: String
+    
+  SecretsManagerSecretName: 
+    Description: SecretsManager Secret that holds AccessToken and RefreshToken values. WARNING! This needs to be added in advance of creation of this template.
+    Type: String
+
+  isSalesForceSandboxEnvironment:
+    Description: Indicate if Salesforce instance is in Sandbox mdoe
+    Type: String
+    Default: false
+    AllowedValues:
+        - true
+        - false
+
+Resources:
+# Create S3 Datalake
+  DatalakeBucket:
+    Type: "AWS::S3::Bucket"
+
+# Create S3 Datalake Bucket POlicy
+  DatalakeBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties: 
+      Bucket: !Ref DatalakeBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: appflow.amazonaws.com
+          Action:
+          - s3:PutObject
+          - s3:AbortMultipartUpload
+          - s3:ListMultipartUploadParts
+          - s3:ListBucketMultipartUploads
+          - s3:GetBucketAcl
+          - s3:PutObjectAcl
+          Resource:
+          - !GetAtt DatalakeBucket.Arn
+          - !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref DatalakeBucket
+              - /*
+
+# Create Amazon AppFlow Connector for Salesforce
+  AppFlowSFDCConnector: 
+    Type: AWS::AppFlow::ConnectorProfile
+    Properties: 
+      ConnectionMode: Public
+      ConnectorType: Salesforce
+      ConnectorProfileName: !Sub ${AWS::StackName}-sfdc 
+      ConnectorProfileConfig: 
+        ConnectorProfileProperties:
+          Salesforce:
+            InstanceUrl: !Ref SalesForceInstanceUrl
+            isSandboxEnvironment: !Ref isSalesForceSandboxEnvironment
+        ConnectorProfileCredentials:
+          Salesforce:
+            AccessToken: !Sub '{{resolve:secretsmanager:${SecretsManagerSecretName}:SecretString:AccessToken}}'
+            RefreshToken: !Sub '{{resolve:secretsmanager:${SecretsManagerSecretName}:SecretString:RefreshToken}}'
+
+# Create Amazon AppFlow to pull data from Salesforce
+  AppFlowSFDCtoS3:
+    DependsOn: AppFlowSFDCConnector
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Sub ${AWS::StackName}-sfdc-to-s3
+      Description: 'Downloads data about patients from Salesforce into a raw S3 datalake'
+      TriggerConfig:
+        TriggerType: OnDemand
+      SourceFlowConfig:
+        ConnectorType: Salesforce
+        ConnectorProfileName: !Ref AppFlowSFDCConnector
+        SourceConnectorProperties:
+          Salesforce:
+            Object: !Ref AppFlowSalesforceObject
+            EnableDynamicFieldUpdate: true
+            IncludeDeletedRecords: false
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: !Ref DatalakeBucket
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                aggregationType: None
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - Id
+        ConnectorOperator:
+          Salesforce: PROJECTION
+
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '[]'
+        ConnectorOperator:
+          Salesforce: NO_OP

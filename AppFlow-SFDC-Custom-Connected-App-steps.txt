@@ -1,0 +1,56 @@
+I’m listing below all the necessary steps and API calls in order to create a connector with your own connected app:
+Create a new KMS key, and add the following in your key policy:
+{
+    "Effect": "Allow",
+    "Principal": {
+        "Service": "appflow.amazonaws.com"
+   },
+    "Action": [
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:Decrypt"
+   ],
+    "Resource": "*"
+}
+ 
+Create a new SecretsManager Secret, and select the newly created KMS key. Add the following Key-Value pairs and Resource permissions:
+Key: clientId ; Value: <Your_connected_App_Client_Id>
+Key: clientSecret ; Value: <Your_connected_App_secret>
+Attach the following Resource permissions policy:
+{
+  "Version" : "2012-10-17",
+  "Statement" : [ {
+    "Effect" : "Allow",
+    "Principal" : {
+      "Service" : "appflow.amazonaws.com"
+   },
+    "Action" : [ "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:DeleteSecret", "secretsmanager:DescribeSecret", "secretsmanager:UpdateSecret" ],
+    "Resource" : "*"
+ } ]
+} 
+ 
+Create a new connector profile via API or CLI and use clientCredentialsArn under the connectionProfileCredentials setting, Here is example of my API call: 
+	POST https://appflow.us-east-1.amazonaws.com/create-connector-profile
+{
+  "connectorProfileName": "<Your_Connection_Profile_Name>",
+  "kmsArn": null,
+  "connectorType": "Salesforce",
+  "connectionMode": "Public",
+  "connectorProfileConfig": {
+    "connectorProfileProperties": {
+      "salesforce": {
+        "instanceUrl": "https://<Your_Salesforce_Instance_URL>",
+        "isSandboxEnvironment": false
+     }
+   },
+    "connectorProfileCredentials": {
+      "Salesforce": {
+        "clientCredentialsArn": "<Your_Secrets_Manager_Secert_Arn",
+        "accessToken": "<Your_Connected_App_Access_Token>",
+        "refreshToken": "<Your_Connected_App_Refresh_Token>","
+     }
+   }
+ }
+}
+ 
+With this in place, you should have the Connector successfully added, and you can use this connector to create flows.
