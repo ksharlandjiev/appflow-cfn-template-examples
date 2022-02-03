@@ -66,6 +66,6 @@ Resources:
         SourceFields: []
         TaskProperties:
         - Key: EXCLUDE_SOURCE_FIELDS_LIST
-          Value: '[]'
+          Value: '["MasterRecordId", "BillingAddress", "ShippingAddress"]'
         ConnectorOperator:
           Salesforce: NO_OP
