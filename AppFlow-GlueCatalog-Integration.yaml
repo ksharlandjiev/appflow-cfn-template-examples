@@ -40,7 +40,7 @@ Resources:
               "Next": "DatabaseExist?",
               "Parameters": {
                 "Config": {
-                  "Database": "appflow",
+                  "Database": "test",
                   "TableName.$": "$.detail['flow-name']",
                   "detail.$": "$.detail"
                 }
@@ -98,15 +98,17 @@ Resources:
                 {
                   "Variable": "$.FlowConfig.DestinationFlowConfigList[0].ConnectorType",
                   "StringEquals": "S3",
-                  "Next": "PrepareTableDefinition"
+                  "Next": "GenerateTableDefinition"
                 }
               ],
               "Default": "S3NotDestination"
             },
-            "PrepareTableDefinition": {
+            "GenerateTableDefinition": {
               "Type": "Pass",
+              "Next": "DestinationFileFormatEvaluator",
               "Parameters": {
                 "Config.$": "$.Config",
+                "FlowConfig.$": "$.FlowConfig",
                 "TableInput": {
                   "Description": "Created by AmazonAppFlow",
                   "Name.$": "$.Config.TableName",
@@ -130,19 +132,51 @@ Resources:
                     "Location.$": "States.Format('s3://{}/{}/', $.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties['S3'].BucketName, $.FlowConfig.FlowName)",
                     "NumberOfBuckets": -1,
                     "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                    "SerdeInfo": {
-                      "Parameters": {
-                        "paths.$": "$.FlowConfig.Tasks[?(@.TaskType == 'Map')].DestinationField"
-                      },
-                      "SerializationLibrary": "org.openx.data.jsonserde.JsonSerDe"
-                    },
                     "SortColumns": [],
                     "StoredAsSubDirectories": false
                   },
                   "TableType": "EXTERNAL_TABLE"
                 }
+              }
+            },
+            "DestinationFileFormatEvaluator": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties['S3'].S3OutputFormatConfig.FileType",
+                  "StringEquals": "CSV",
+                  "Next": "CSVSerdeInfo"
+                },
+                {
+                  "Variable": "$.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties['S3'].S3OutputFormatConfig.FileType",
+                  "StringEquals": "PARQUET",
+                  "Next": "ParquetSerdeInfo"
+                }
+              ],
+              "Default": "JsonSerdeInfo"
+            },
+            "CSVSerdeInfo": {
+              "Type": "Pass",
+              "Next": "Map",
+              "Parameters": {
+                "Parameters": {
+                  "paths.$": "$.FlowConfig.Tasks[?(@.TaskType == 'Map')].DestinationField",
+                  "field.delim": ","
+                },
+                "SerializationLibrary": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe"
               },
-              "Next": "Map"
+              "ResultPath": "$.TableInput.StorageDescriptor.SerdeInfo"
+            },
+            "JsonSerdeInfo": {
+              "Type": "Pass",
+              "Parameters": {
+                "Parameters": {
+                  "paths.$": "$.FlowConfig.Tasks[?(@.TaskType == 'Map')].DestinationField"
+                },
+                "SerializationLibrary": "org.openx.data.jsonserde.JsonSerDe"
+              },
+              "Next": "Map",
+              "ResultPath": "$.TableInput.StorageDescriptor.SerdeInfo"
             },
             "Map": {
               "Type": "Map",
@@ -206,14 +240,45 @@ Resources:
                       "IsPresent": true
                     }
                   ],
-                  "Next": "ConfigureDestination"
+                  "Next": "SingleFileAggregation?"
                 }
               ],
               "Default": "Success"
             },
+            "SingleFileAggregation?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties.S3.S3OutputFormatConfig.AggregationConfig.AggregationType",
+                  "StringEquals": "SingleFile",
+                  "Next": "IsPartitionExist?"
+                }
+              ],
+              "Default": "ConfigureDestination"
+            },
+            "IsPartitionExist?": {
+              "Type": "Task",
+              "Next": "Success",
+              "Parameters": {
+                "DatabaseName.$": "$.Config.Database",
+                "PartitionValues.$": "States.Array($.Config.TableName)",
+                "TableName.$": "$.Config.TableName"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:getPartition",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "CreateMainPartition",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "ResultPath": null
+            },
             "ConfigureDestination": {
               "Type": "Pass",
-              "Next": "CreatePartition",
+              "Next": "CreateNewPartition",
               "Parameters": {
                 "InputFormat.$": "$.TableInput.StorageDescriptor.InputFormat",
                 "OutputFormat.$": "$.TableInput.StorageDescriptor.OutputFormat",
@@ -224,9 +289,9 @@ Resources:
               },
               "ResultPath": "$.TableInput.StorageDescriptor"
             },
-            "CreatePartition": {
+            "CreateNewPartition": {
               "Type": "Task",
-              "End": true,
+              "Next": "Success",
               "Parameters": {
                 "DatabaseName.$": "$.Config.Database",
                 "TableName.$": "$.Config.TableName",
@@ -236,6 +301,19 @@ Resources:
                 }
               },
               "Resource": "arn:aws:states:::aws-sdk:glue:createPartition"
+            },
+            "CreateMainPartition": {
+              "Type": "Task",
+              "Parameters": {
+                "DatabaseName.$": "$.Config.Database",
+                "TableName.$": "$.Config.TableName",
+                "PartitionInput": {
+                  "Values.$": "States.Array($.Config.TableName)",
+                  "StorageDescriptor.$": "$.TableInput.StorageDescriptor"
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:createPartition",
+              "Next": "Success"
             },
             "Success": {
               "Type": "Succeed"
@@ -254,9 +332,31 @@ Resources:
               "Type": "Fail",
               "Error": "IncompatibleDestination",
               "Cause": "Failed to create Glue table. Flow destination must be an S3 bucket."
+            },
+            "ParquetSerdeInfo": {
+              "Type": "Pass",
+              "Next": "Map",
+              "Parameters": {
+                "BucketColumns": [],
+                "Columns.$": "$.FlowConfig.Tasks[?(@.TaskType == 'Map')]",
+                "Compressed": false,
+                "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+                "Location.$": "States.Format('s3://{}/{}/', $.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties['S3'].BucketName, $.FlowConfig.FlowName)",
+                "NumberOfBuckets": -1,
+                "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+                "SerdeInfo": {
+                  "Parameters": {
+                    "serialization.format": "1"
+                  },
+                  "SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+                },
+                "SortColumns": [],
+                "StoredAsSubDirectories": false
+              },
+              "ResultPath": "$.TableInput.StorageDescriptor"
             }
           }
-        }
+        }        
 
       StateMachineType: "STANDARD"  
       LoggingConfiguration:
