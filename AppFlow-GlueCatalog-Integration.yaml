@@ -1,0 +1,370 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  This template will create a set of resources:
+    * Step function to orchestrate the creation of glue table and partitions 
+    * EventBridge rule to listen for succesful flow executions.
+  IMPORTANT!!!
+    - The current PoC works only with AppFlow setup <Source> -> S3. 
+    - The current PoC works only when file format is JSON (TODO: figure way to map the format to the deserialiser librarires for glue)
+    - The current PoC works only if files are not aggregated into a single file (this is appflow option). (TODO: Make a check and skip amending "Location" if files are getting agregated when creating a new )
+  
+Parameters:
+
+  CloudWatchLogLevel:
+    Description: "Log level for AWS StepFunctions"
+    Type: String
+    Default: ERROR
+    AllowedValues:
+      - ALL
+      - ERROR
+      - FATAL
+      - OFF
+
+Resources:
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# StepFunction - to generate glue table. 
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+ # Definition of our AWS Step Function. The actual ASL is extracted in statemachine/RealWorldExample.asl.json file.          
+  ManageGlueTables:
+    Type: AWS::StepFunctions::StateMachine
+    DependsOn: ProcessingStateMachineLogGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}
+      DefinitionString: |-
+        {
+          "Comment": "Orechestrate Glue Catalog table create/update based on flow execution. Warning: This PoC works with JSON format only and without single file agregations (for now)",
+          "StartAt": "SetDatabaseAndContext",
+          "States": {
+            "SetDatabaseAndContext": {
+              "Type": "Pass",
+              "Next": "DatabaseExist?",
+              "Parameters": {
+                "Config": {
+                  "Database": "appflow",
+                  "TableName.$": "$.detail['flow-name']",
+                  "detail.$": "$.detail"
+                }
+              }
+            },
+            "DatabaseExist?": {
+              "Type": "Task",
+              "Next": "DescribeFlow",
+              "Parameters": {
+                "Name.$": "$.Config.Database"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:getDatabase",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Comment": "Create Glue Database",
+                  "Next": "CreateDatabase",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "ResultPath": null
+            },
+            "CreateDatabase": {
+              "Type": "Task",
+              "Next": "CleanUpError",
+              "Parameters": {
+                "DatabaseInput": {
+                  "Name.$": "$.Config.Database"
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:createDatabase",
+              "ResultPath": null
+            },
+            "CleanUpError": {
+              "Type": "Pass",
+              "Next": "DescribeFlow",
+              "Parameters": {
+                "Config.$": "$.Config"
+              }
+            },
+            "DescribeFlow": {
+              "Type": "Task",
+              "Parameters": {
+                "FlowName.$": "$.Config.detail['flow-name']"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:appflow:describeFlow",
+              "Next": "S3AsDestination?",
+              "ResultPath": "$.FlowConfig"
+            },
+            "S3AsDestination?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.FlowConfig.DestinationFlowConfigList[0].ConnectorType",
+                  "StringEquals": "S3",
+                  "Next": "PrepareTableDefinition"
+                }
+              ],
+              "Default": "S3NotDestination"
+            },
+            "PrepareTableDefinition": {
+              "Type": "Pass",
+              "Parameters": {
+                "Config.$": "$.Config",
+                "TableInput": {
+                  "Description": "Created by AmazonAppFlow",
+                  "Name.$": "$.Config.TableName",
+                  "PartitionKeys": [
+                    {
+                      "Name": "partition_0",
+                      "Type": "string"
+                    }
+                  ],
+                  "Retention": 0,
+                  "Parameters": {
+                    "compressionType": "none",
+                    "classification.$": "$.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties['S3'].S3OutputFormatConfig.FileType",
+                    "typeOfData": "file"
+                  },
+                  "StorageDescriptor": {
+                    "BucketColumns": [],
+                    "Columns.$": "$.FlowConfig.Tasks[?(@.TaskType == 'Map')]",
+                    "Compressed": false,
+                    "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
+                    "Location.$": "States.Format('s3://{}/{}/', $.FlowConfig.DestinationFlowConfigList[0].DestinationConnectorProperties['S3'].BucketName, $.FlowConfig.FlowName)",
+                    "NumberOfBuckets": -1,
+                    "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                    "SerdeInfo": {
+                      "Parameters": {
+                        "paths.$": "$.FlowConfig.Tasks[?(@.TaskType == 'Map')].DestinationField"
+                      },
+                      "SerializationLibrary": "org.openx.data.jsonserde.JsonSerDe"
+                    },
+                    "SortColumns": [],
+                    "StoredAsSubDirectories": false
+                  },
+                  "TableType": "EXTERNAL_TABLE"
+                }
+              },
+              "Next": "Map"
+            },
+            "Map": {
+              "Type": "Map",
+              "Iterator": {
+                "StartAt": "FormatField",
+                "States": {
+                  "FormatField": {
+                    "Type": "Pass",
+                    "End": true,
+                    "Parameters": {
+                      "Name.$": "$.DestinationField",
+                      "Type": "string"
+                    }
+                  }
+                }
+              },
+              "ItemsPath": "$.TableInput.StorageDescriptor.Columns",
+              "ResultPath": "$.TableInput.StorageDescriptor.Columns",
+              "Next": "TableExist?"
+            },
+            "TableExist?": {
+              "Type": "Task",
+              "Next": "UpdateTable",
+              "Parameters": {
+                "DatabaseName.$": "$.Config.Database",
+                "Name.$": "$.Config.TableName"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:getTable",
+              "Catch": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "Next": "CreateTable",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "Comment": "$.error",
+              "ResultSelector": {
+                "Table.$": "$.Table"
+              },
+              "ResultPath": null
+            },
+            "UpdateTable": {
+              "Type": "Task",
+              "Parameters": {
+                "DatabaseName.$": "$.Config.Database",
+                "TableInput.$": "$.TableInput"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:updateTable",
+              "Next": "AddPartition?",
+              "ResultPath": null
+            },
+            "AddPartition?": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "And": [
+                    {
+                      "Variable": "$.Config.detail['execution-id']",
+                      "IsPresent": true
+                    }
+                  ],
+                  "Next": "ConfigureDestination"
+                }
+              ],
+              "Default": "Success"
+            },
+            "ConfigureDestination": {
+              "Type": "Pass",
+              "Next": "CreatePartition",
+              "Parameters": {
+                "InputFormat.$": "$.TableInput.StorageDescriptor.InputFormat",
+                "OutputFormat.$": "$.TableInput.StorageDescriptor.OutputFormat",
+                "Columns.$": "$.TableInput.StorageDescriptor.Columns",
+                "Compressed.$": "$.TableInput.StorageDescriptor.Compressed",
+                "SerdeInfo.$": "$.TableInput.StorageDescriptor.SerdeInfo",
+                "Location.$": "States.Format('{}{}', $.TableInput.StorageDescriptor.Location, $.Config.detail['execution-id'])"
+              },
+              "ResultPath": "$.TableInput.StorageDescriptor"
+            },
+            "CreatePartition": {
+              "Type": "Task",
+              "End": true,
+              "Parameters": {
+                "DatabaseName.$": "$.Config.Database",
+                "TableName.$": "$.Config.TableName",
+                "PartitionInput": {
+                  "Values.$": "States.Array($.Config.detail['execution-id'])",
+                  "StorageDescriptor.$": "$.TableInput.StorageDescriptor"
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:createPartition"
+            },
+            "Success": {
+              "Type": "Succeed"
+            },
+            "CreateTable": {
+              "Type": "Task",
+              "Parameters": {
+                "DatabaseName.$": "$.Config.Database",
+                "TableInput.$": "$.TableInput"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:glue:createTable",
+              "Next": "AddPartition?",
+              "ResultPath": null
+            },
+            "S3NotDestination": {
+              "Type": "Fail",
+              "Error": "IncompatibleDestination",
+              "Cause": "Failed to create Glue table. Flow destination must be an S3 bucket."
+            }
+          }
+        }
+
+      StateMachineType: "STANDARD"  
+      LoggingConfiguration:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ProcessingStateMachineLogGroup.Arn
+              
+        IncludeExecutionData: false
+        Level: !Ref CloudWatchLogLevel 
+      RoleArn: !GetAtt StatesExecutionRole.Arn            
+      
+  # Execution Role to allow Step Function to InvokeLambda, Log data into CloudWatch, publish events in EvnetBridge          
+  StatesExecutionRole:
+    DependsOn: ProcessingStateMachineLogGroup
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+                - !Sub states.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"   
+      Policies:
+        - PolicyName: StatesLoggingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: "*"
+        - PolicyName: StartGlueCrawler
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - appflow:DescribeFlow
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:CreateDatabase
+                  - glue:GetTable
+                  - glue:CreateTable
+                  - glue:UpdateTable
+                  - glue:CreatePartition
+                Resource: "*"
+                
+  # Define CloudWatch Log Group for State execution logs
+  ProcessingStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "stepfunctions/${AWS::StackName}-crawler-starter" 
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# EventBridge - run Step Function - to create glue table.
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- #
+# Event Rule to trigger Glue Crawler once data from salesforce come into our datalake.
+  EventBridgeAppFlowRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "EventRule"
+      State: "ENABLED"
+      EventPattern: 
+        source:
+        - aws.appflow
+        detail:
+          status:
+          - "Execution Successful"
+      Targets: 
+        - 
+          Id: !GetAtt ManageGlueTables.Name
+          Arn: !Ref ManageGlueTables
+          RoleArn: !GetAtt 
+            - EventBridgeIAMrole
+            - Arn
+# EventBridge IAM role to allow execution fo step functions.
+  EventBridgeIAMrole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: PutEventsDestinationBus
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                  - 'states:StartSyncExecution'
+                Resource: !Ref ManageGlueTables
+
