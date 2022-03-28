@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Helping customers break down data silos with AWS Integration services
+  
+Parameters:
+  ConnectorName:
+    Description: The name of the SAP connector
+    Type: String
+
+  ObjectPath:
+    Description: The name of the SAP object we will ingest with AppFlow
+    Type: String
+
+  AppFlowSAPFlowName: 
+    Description: Name of the flow to be used to pull data from SAP
+    Type: String
+
+  DestinationS3BucketName: 
+    Description: Name of the Destination S3 Bucket
+    Type: String
+
+
+Resources:        
+# Create Amazon AppFlow to pull data from SAP and store into S3
+  SapToS3Flow:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Ref AppFlowSAPFlowName
+      Description: 'Pull data from SAP and saves into S3'
+      TriggerConfig:
+        TriggerType: OnDemand
+      SourceFlowConfig:
+        ConnectorProfileName: !Ref ConnectorName
+        ConnectorType: SAPOData
+        SourceConnectorProperties:
+          SAPOData:
+            ObjectPath: !Ref ObjectPath              
+
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: !Ref DestinationS3BucketName
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                aggregationType: None
+      Tasks:
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '[]'
+        ConnectorOperator:
+          SAPOData: NO_OP
