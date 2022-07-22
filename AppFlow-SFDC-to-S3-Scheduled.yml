@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Helping customers break down data silos with AWS Integration services
+  
+Parameters:
+  AppFlowSalesforceConnectorName:
+    Description: The name of the salesforce connector
+    Type: String
+
+  AppFlowSalesforceObject:
+    Description: The name of the salesforce object we will ingest with AppFlow
+    Type: String
+    Default: "Account"     
+
+  AppFlowSalesForceFlowName: 
+    Description: Name of the flow to be used to pull data from Salesforce
+    Type: String
+
+  DestinationS3BucketName: 
+    Description: Name of the Destination S3 Bucket
+    Type: String
+
+  EnableDynamicFieldUpdate:
+    Description: Enable AppFlow to update schema with new fields 
+    Type: String  
+    Default: true
+
+  IncludeDeletedRecords:
+    Description: The name of the salesforce connector
+    Type: String  
+    Default: true
+
+Resources:        
+# Create Amazon AppFlow to pull data from Salesforce and store into S3
+  AppFlowSFDCtoS3:
+    Type: AWS::AppFlow::Flow
+    Properties: 
+      FlowName: !Ref AppFlowSalesForceFlowName
+      Description: 'Pull data from Salesforce and saves into S3'
+      TriggerConfig:
+        TriggerType: Scheduled
+        TriggerProperties:
+          ScheduleExpression: rate(1minutes)
+          DataPullMode: Incremental
+          ScheduleStartTime: 1658484720
+          ScheduleOffset: 0
+          FirstExecutionFrom: 364639780
+      SourceFlowConfig:
+        ConnectorType: Salesforce
+        ConnectorProfileName: !Ref AppFlowSalesforceConnectorName
+        SourceConnectorProperties:
+          Salesforce:
+            Object: !Ref AppFlowSalesforceObject
+            EnableDynamicFieldUpdate: !Ref EnableDynamicFieldUpdate
+            IncludeDeletedRecords: !Ref IncludeDeletedRecords 
+      DestinationFlowConfigList:
+      - ConnectorType: S3
+        DestinationConnectorProperties:
+          S3:
+            BucketName: !Ref DestinationS3BucketName
+            S3OutputFormatConfig:
+              FileType: JSON
+              AggregationConfig:
+                aggregationType: None
+      Tasks:
+      - TaskType: Filter
+        SourceFields:
+        - Id
+        ConnectorOperator:
+          Salesforce: PROJECTION
+
+      - TaskType: Map_all
+        SourceFields: []
+        TaskProperties:
+        - Key: EXCLUDE_SOURCE_FIELDS_LIST
+          Value: '["MasterRecordId", "BillingAddress", "ShippingAddress"]'
+        ConnectorOperator:
+          Salesforce: NO_OP
