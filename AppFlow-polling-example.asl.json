@@ -1,0 +1,69 @@
+{
+  "Comment": "A description of my state machine",
+  "StartAt": "AppFlow :: StartFlow",
+  "States": {
+    "AppFlow :: StartFlow": {
+      "Type": "Task",
+      "Parameters": {
+        "FlowName.$": "$.flowName"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:appflow:startFlow",
+      "Next": "Wait for 10 seconds",
+      "ResultPath": "$.Flow"
+    },
+    "Wait for 10 seconds": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "AppFlow :: DescribeFlowExecutionRecords"
+    },
+    "AppFlow :: DescribeFlowExecutionRecords": {
+      "Type": "Task",
+      "Parameters": {
+        "FlowName.$": "$.flowName"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:appflow:describeFlowExecutionRecords",
+      "Next": "Flow Execution Completed?",
+      "ResultPath": "$.Executions"
+    },
+    "Flow Execution Completed?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.Executions.FlowExecutions[0]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.Executions.FlowExecutions[0].ExecutionId",
+              "StringEqualsPath": "$.Flow.ExecutionId"
+            },
+            {
+              "Variable": "$.Executions.FlowExecutions[0].ExecutionStatus",
+              "StringEquals": "InProgress"
+            }
+          ],
+          "Next": "Wait for 10 seconds"
+        }
+      ],
+      "Default": "Succesful Flow Execution?"
+    },
+    "Succesful Flow Execution?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Executions.FlowExecutions[0].ExecutionStatus",
+          "StringEquals": "Successful",
+          "Next": "Success"
+        }
+      ],
+      "Default": "Flow Execution Failed"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Flow Execution Failed": {
+      "Type": "Fail"
+    }
+  }
+}
