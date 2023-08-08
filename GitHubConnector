@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: GitHub connector profile example
+
+Parameters:
+
+  ClientId:
+    Description: Oauth ClientID
+    Type: String  
+
+  ClientSecret:
+    Description: Oauth ClientSecret
+    Type: String  
+
+  AccessToken:
+    Description: Oauth AccessToken
+    Type: String  
+
+  AuthCode: 
+    Description: Oauth AuthCode
+    Type: String  
+
+  RedirectUri: 
+    Description: Oauth RedirectURI
+    Type: String
+    Default: https://us-east-1.console.aws.amazon.com/appflow/oauth
+
+Resources:
+# Create Amazon AppFlow Connector for GitHub
+  AppFlowGitHubConnector: 
+    Type: AWS::AppFlow::ConnectorProfile
+    Properties:       
+      ConnectionMode: Public
+      ConnectorLabel: GitHub
+      ConnectorType: CustomConnector      
+      ConnectorProfileName: !Sub ${AWS::StackName}-github
+
+      ConnectorProfileConfig:
+        ConnectorProfileProperties:
+          CustomConnector:
+            OAuth2Properties:
+              TokenUrl: https://github.com/login/oauth/access_token
+              OAuth2GrantType: AUTHORIZATION_CODE
+        ConnectorProfileCredentials:
+          CustomConnector:
+            AuthenticationType: OAUTH2
+            Oauth2:
+              ClientId: !Ref ClientId
+              ClientSecret: !Ref ClientSecret
+              AccessToken: !Ref AccessToken
+              OAuthRequest:
+                AuthCode: !Ref AuthCode
+                RedirectUri: !Ref RedirectUri
